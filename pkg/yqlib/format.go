@@ -93,6 +93,11 @@ var INIFormat = &Format{"ini", []string{"i"},
 	func() Decoder { return NewINIDecoder() },
 }
 
+var ToonFormat = &Format{"toon", []string{},
+	func() Encoder { return NewToonEncoder(ConfiguredToonPreferences) },
+	func() Decoder { return NewToonDecoder() },
+}
+
 var Formats = []*Format{
 	YamlFormat,
 	KYamlFormat,
@@ -109,6 +114,7 @@ var Formats = []*Format{
 	ShellVariablesFormat,
 	LuaFormat,
 	INIFormat,
+	ToonFormat,
 }
 
 func (f *Format) MatchesName(name string) bool {
