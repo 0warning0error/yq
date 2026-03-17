@@ -199,12 +199,16 @@ var toonFormatScenarios = []formatScenario{
 }
 
 func testToonScenario(t *testing.T, s formatScenario) {
+	// Disable colors for testing to avoid ANSI escape codes in comparisons
+	toonPrefs := ConfiguredToonPreferences
+	toonPrefs.ColorsEnabled = false
+
 	switch s.scenarioType {
 	case "decode":
 		result := mustProcessFormatScenario(s, NewToonDecoder(), NewYamlEncoder(ConfiguredYamlPreferences))
 		test.AssertResultWithContext(t, s.expected, result, s.description)
 	case "roundtrip":
-		test.AssertResultWithContext(t, s.expected, mustProcessFormatScenario(s, NewToonDecoder(), NewToonEncoder(ConfiguredToonPreferences)), s.description)
+		test.AssertResultWithContext(t, s.expected, mustProcessFormatScenario(s, NewToonDecoder(), NewToonEncoder(toonPrefs)), s.description)
 	}
 }
 
@@ -265,7 +269,10 @@ func documentToonRoundTripScenario(w *bufio.Writer, s formatScenario) {
 	writeOrPanic(w, fmt.Sprintf("```bash\nyq -otoon%v sample.toon\n```\n", expression))
 	writeOrPanic(w, "will output\n")
 
-	writeOrPanic(w, fmt.Sprintf("```toon\n%v```\n\n", mustProcessFormatScenario(s, NewToonDecoder(), NewToonEncoder(ConfiguredToonPreferences))))
+	// Disable colors for documentation output
+	toonPrefs := ConfiguredToonPreferences
+	toonPrefs.ColorsEnabled = false
+	writeOrPanic(w, fmt.Sprintf("```toon\n%v```\n\n", mustProcessFormatScenario(s, NewToonDecoder(), NewToonEncoder(toonPrefs))))
 }
 
 func TestToonEncoderPrintDocumentSeparator(t *testing.T) {

@@ -3,21 +3,27 @@
 package yqlib
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
+
+	"github.com/fatih/color"
 )
 
 // ToonPreferences holds configuration options for TOON encoding.
 type ToonPreferences struct {
-	Indent    int
-	Delimiter string // ",", "\t", or "|"
+	Indent        int
+	Delimiter     string // ",", "\t", or "|"
+	ColorsEnabled bool
 }
 
 // ConfiguredToonPreferences is the global TOON preferences instance.
 var ConfiguredToonPreferences = ToonPreferences{
-	Indent:    2,
-	Delimiter: ",",
+	Indent:        2,
+	Delimiter:     ",",
+	ColorsEnabled: true,
 }
 
 type toonEncoder struct {
@@ -44,21 +50,36 @@ func (te *toonEncoder) PrintLeadingContent(_ io.Writer, _ string) error {
 func (te *toonEncoder) Encode(writer io.Writer, node *CandidateNode) error {
 	log.Debugf("TOON encoding %v", NodeToString(node))
 
+	destination := writer
+	tempBuffer := bytes.NewBuffer(nil)
+	if te.prefs.ColorsEnabled {
+		destination = tempBuffer
+	}
+
 	// Handle scalar at root level
 	if node.Kind == ScalarNode {
 		encoded := te.encodePrimitive(node)
-		return writeString(writer, encoded+"\n")
+		if te.prefs.ColorsEnabled {
+			return colorizeToonAndPrint([]byte(encoded+"\n"), writer)
+		}
+		return writeString(destination, encoded+"\n")
 	}
 
 	// Handle array at root level
 	if node.Kind == SequenceNode {
-		te.encodeArrayLines(writer, "", node, 0)
+		te.encodeArrayLines(destination, "", node, 0)
+		if te.prefs.ColorsEnabled {
+			return colorizeToonAndPrint(tempBuffer.Bytes(), writer)
+		}
 		return nil
 	}
 
 	// Handle object at root level
 	if node.Kind == MappingNode {
-		te.encodeObjectLines(writer, node, 0)
+		te.encodeObjectLines(destination, node, 0)
+		if te.prefs.ColorsEnabled {
+			return colorizeToonAndPrint(tempBuffer.Bytes(), writer)
+		}
 		return nil
 	}
 
@@ -533,6 +554,339 @@ func (te *toonEncoder) formatHeader(key string, length int, fields []string) str
 func (te *toonEncoder) writeIndentedLine(writer io.Writer, depth int, content string) {
 	indent := strings.Repeat(" ", te.prefs.Indent*depth)
 	writeString(writer, indent+content+"\n")
+}
+
+// #endregion
+
+// #region Colorization
+
+const toonEscape = "\x1b"
+
+func toonFormat(attr color.Attribute) string {
+	return fmt.Sprintf("%s[%dm", toonEscape, attr)
+}
+
+// colorizeToonAndPrint applies syntax highlighting to TOON format output.
+func colorizeToonAndPrint(toonBytes []byte, writer io.Writer) error {
+	lines := bytes.Split(toonBytes, []byte("\n"))
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		colorized := colorizeToonLine(line)
+		if _, err := writer.Write(append(colorized, '\n')); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// colorizeToonLine applies colors to a single TOON line.
+func colorizeToonLine(line []byte) []byte {
+	lineStr := string(line)
+	var result strings.Builder
+	i := 0
+
+	for i < len(lineStr) {
+		c := lineStr[i]
+
+		// Handle indentation (whitespace at start)
+		if c == ' ' && i == 0 {
+			result.WriteByte(c)
+			i++
+			continue
+		}
+
+		// Check for array header pattern: key[length]: or key[length]{fields}:
+		if idx := strings.Index(lineStr[i:], "["); idx != -1 {
+			// Check if this looks like an array header
+			keyPart := lineStr[i : i+idx]
+			if restIdx := strings.Index(lineStr[i+idx:], "]:"); restIdx != -1 {
+				// This is an array header
+				restStart := i + idx + restIdx + 2
+
+				// Colorize key (cyan)
+				result.WriteString(toonFormat(color.FgCyan))
+				result.WriteString(keyPart)
+				result.WriteString(toonFormat(color.Reset))
+
+				// Colorize brackets and length (yellow)
+				result.WriteString(toonFormat(color.FgHiYellow))
+				result.WriteString(lineStr[i+idx : restStart])
+				result.WriteString(toonFormat(color.Reset))
+
+				// Check for fields in braces
+				if restStart < len(lineStr) && lineStr[restStart] == '{' {
+					braceEnd := strings.Index(lineStr[restStart:], "}")
+					if braceEnd != -1 {
+						braceEnd += restStart
+						// Colorize braces and fields (magenta)
+						result.WriteString(toonFormat(color.FgHiMagenta))
+						result.WriteString(lineStr[restStart : braceEnd+1])
+						result.WriteString(toonFormat(color.Reset))
+						restStart = braceEnd + 1
+					}
+				}
+
+				// Colorize colon (white/default)
+				if restStart < len(lineStr) && lineStr[restStart] == ':' {
+					result.WriteByte(':')
+					restStart++
+				}
+
+				// Colorize inline values after colon
+				if restStart < len(lineStr) {
+					afterColon := strings.TrimSpace(lineStr[restStart:])
+					if afterColon != "" {
+						result.WriteByte(' ')
+						colorizeToonValues(&result, afterColon, ",")
+					}
+				}
+
+				return []byte(result.String())
+			}
+		}
+
+		// Check for list item marker
+		if c == '-' && (i == 0 || lineStr[i-1] == ' ') {
+			// Check if this is a list item (followed by space or end of line)
+			if i+1 >= len(lineStr) || lineStr[i+1] == ' ' {
+				result.WriteString(toonFormat(color.FgHiYellow))
+				result.WriteByte('-')
+				result.WriteString(toonFormat(color.Reset))
+				i++
+
+				// Skip space after hyphen
+				if i < len(lineStr) && lineStr[i] == ' ' {
+					result.WriteByte(' ')
+					i++
+				}
+
+				// Process rest of line
+				if i < len(lineStr) {
+					rest := lineStr[i:]
+					// Check for key: value pattern
+					if colonIdx := strings.Index(rest, ": "); colonIdx != -1 {
+						key := rest[:colonIdx]
+						value := rest[colonIdx+2:]
+
+						// Colorize key (cyan)
+						result.WriteString(toonFormat(color.FgCyan))
+						result.WriteString(key)
+						result.WriteString(toonFormat(color.Reset))
+						result.WriteString(": ")
+
+						// Colorize value
+						colorizeToonValue(&result, value)
+					} else if strings.HasSuffix(rest, ":") {
+						// Just a key with colon (nested object)
+						key := rest[:len(rest)-1]
+						result.WriteString(toonFormat(color.FgCyan))
+						result.WriteString(key)
+						result.WriteString(toonFormat(color.Reset))
+						result.WriteByte(':')
+					} else {
+						// Primitive value after hyphen
+						colorizeToonValue(&result, rest)
+					}
+				}
+				return []byte(result.String())
+			}
+		}
+
+		// Check for key: value pattern
+		if colonIdx := strings.Index(lineStr[i:], ": "); colonIdx != -1 {
+			key := lineStr[i : i+colonIdx]
+			value := lineStr[i+colonIdx+2:]
+
+			// Colorize key (cyan)
+			result.WriteString(toonFormat(color.FgCyan))
+			result.WriteString(key)
+			result.WriteString(toonFormat(color.Reset))
+			result.WriteString(": ")
+
+			// Colorize value
+			colorizeToonValue(&result, value)
+			return []byte(result.String())
+		}
+
+		// Check for key: (no value, nested object)
+		if strings.HasSuffix(lineStr[i:], ":") {
+			key := lineStr[i : len(lineStr)-1]
+			result.WriteString(toonFormat(color.FgCyan))
+			result.WriteString(key)
+			result.WriteString(toonFormat(color.Reset))
+			result.WriteByte(':')
+			return []byte(result.String())
+		}
+
+		// Tabular row or primitive values (comma-separated)
+		if strings.Contains(lineStr[i:], ",") {
+			colorizeToonValues(&result, lineStr[i:], ",")
+			return []byte(result.String())
+		}
+
+		// Fallback: colorize as primitive value
+		colorizeToonValue(&result, lineStr[i:])
+		return []byte(result.String())
+	}
+
+	return []byte(result.String())
+}
+
+// colorizeToonValue colorizes a single primitive value.
+func colorizeToonValue(result *strings.Builder, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+
+	// Quoted string (green)
+	if strings.HasPrefix(value, "\"") {
+		// Find end quote
+		end := findEndQuote(value)
+		if end == len(value)-1 {
+			result.WriteString(toonFormat(color.FgGreen))
+			result.WriteString(value)
+			result.WriteString(toonFormat(color.Reset))
+			return
+		}
+	}
+
+	// Boolean (magenta)
+	lower := strings.ToLower(value)
+	if lower == "true" || lower == "false" {
+		result.WriteString(toonFormat(color.FgHiMagenta))
+		result.WriteString(value)
+		result.WriteString(toonFormat(color.Reset))
+		return
+	}
+
+	// Null (magenta)
+	if lower == "null" {
+		result.WriteString(toonFormat(color.FgHiMagenta))
+		result.WriteString(value)
+		result.WriteString(toonFormat(color.Reset))
+		return
+	}
+
+	// Number (magenta)
+	if isToonNumber(value) {
+		result.WriteString(toonFormat(color.FgHiMagenta))
+		result.WriteString(value)
+		result.WriteString(toonFormat(color.Reset))
+		return
+	}
+
+	// Default: string (no color)
+	result.WriteString(value)
+}
+
+// colorizeToonValues colorizes comma-separated values.
+func colorizeToonValues(result *strings.Builder, values string, delimiter string) {
+	parts := splitToonValues(values, delimiter)
+	for idx, part := range parts {
+		if idx > 0 {
+			result.WriteString(delimiter)
+		}
+		colorizeToonValue(result, part)
+	}
+}
+
+// splitToonValues splits values respecting quoted strings.
+func splitToonValues(s string, delimiter string) []string {
+	var result []string
+	var current strings.Builder
+	inQuotes := false
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+
+		if c == '\\' && inQuotes && i+1 < len(s) {
+			current.WriteByte(c)
+			current.WriteByte(s[i+1])
+			i++
+			continue
+		}
+
+		if c == '"' {
+			inQuotes = !inQuotes
+			current.WriteByte(c)
+			continue
+		}
+
+		if !inQuotes && strings.HasPrefix(s[i:], delimiter) {
+			result = append(result, strings.TrimSpace(current.String()))
+			current.Reset()
+			i += len(delimiter) - 1
+			continue
+		}
+
+		current.WriteByte(c)
+	}
+
+	if current.Len() > 0 || len(result) > 0 {
+		result = append(result, strings.TrimSpace(current.String()))
+	}
+
+	return result
+}
+
+// findEndQuote finds the closing quote in a string.
+func findEndQuote(s string) int {
+	if len(s) < 2 || s[0] != '"' {
+		return -1
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			continue
+		}
+		if s[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+// isToonNumber checks if a string is a numeric literal.
+func isToonNumber(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	start := 0
+	if s[0] == '-' {
+		start = 1
+	}
+	if start >= len(s) {
+		return false
+	}
+
+	hasDigit := false
+	hasDot := false
+	hasExp := false
+
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+			continue
+		}
+		if c == '.' && !hasDot && !hasExp {
+			hasDot = true
+			continue
+		}
+		if (c == 'e' || c == 'E') && !hasExp {
+			hasExp = true
+			if i+1 < len(s) && (s[i+1] == '+' || s[i+1] == '-') {
+				i++
+			}
+			continue
+		}
+		return false
+	}
+
+	return hasDigit
 }
 
 // #endregion
