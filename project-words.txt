@@ -159,6 +159,7 @@ noninteractive
 Nonquoting
 nosec
 notoml
+notoon
 noxml
 nolua
 nullinput

@@ -266,7 +266,7 @@ func documentToonRoundTripScenario(w *bufio.Writer, s formatScenario) {
 	if s.expression != "" {
 		expression = fmt.Sprintf(" '%v'", s.expression)
 	}
-	writeOrPanic(w, fmt.Sprintf("```bash\nyq -otoon%v sample.toon\n```\n", expression))
+	writeOrPanic(w, fmt.Sprintf("```bash\nyq -o toon%v sample.toon\n```\n", expression))
 	writeOrPanic(w, "will output\n")
 
 	// Disable colors for documentation output

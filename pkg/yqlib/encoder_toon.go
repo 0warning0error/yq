@@ -57,36 +57,32 @@ func (te *toonEncoder) Encode(writer io.Writer, node *CandidateNode) error {
 	}
 
 	// Handle scalar at root level
-	if node.Kind == ScalarNode {
+	switch node.Kind {
+	case ScalarNode:
 		encoded := te.encodePrimitive(node)
 		if te.prefs.ColorsEnabled {
-			return colorizeToonAndPrint([]byte(encoded+"\n"), writer)
+			return colourizeToonAndPrint([]byte(encoded+"\n"), writer)
 		}
 		return writeString(destination, encoded+"\n")
-	}
-
-	// Handle array at root level
-	if node.Kind == SequenceNode {
-		te.encodeArrayLines(destination, "", node, 0)
+	case SequenceNode:
+		if err := te.encodeArrayLines(destination, "", node, 0); err != nil {
+			return err
+		}
 		if te.prefs.ColorsEnabled {
-			return colorizeToonAndPrint(tempBuffer.Bytes(), writer)
+			return colourizeToonAndPrint(tempBuffer.Bytes(), writer)
+		}
+		return nil
+	case MappingNode:
+		if err := te.encodeObjectLines(destination, node, 0); err != nil {
+			return err
+		}
+		if te.prefs.ColorsEnabled {
+			return colourizeToonAndPrint(tempBuffer.Bytes(), writer)
 		}
 		return nil
 	}
-
-	// Handle object at root level
-	if node.Kind == MappingNode {
-		te.encodeObjectLines(destination, node, 0)
-		if te.prefs.ColorsEnabled {
-			return colorizeToonAndPrint(tempBuffer.Bytes(), writer)
-		}
-		return nil
-	}
-
 	return nil
 }
-
-// #region Primitive encoding
 
 func (te *toonEncoder) encodePrimitive(node *CandidateNode) string {
 	tag := node.guessTagFromCustomType()
@@ -226,10 +222,6 @@ func (te *toonEncoder) escapeString(value string) string {
 	return result.String()
 }
 
-// #endregion
-
-// #region Key encoding
-
 func (te *toonEncoder) encodeKey(key string) string {
 	if te.isValidUnquotedKey(key) {
 		return key
@@ -243,75 +235,72 @@ func (te *toonEncoder) isValidUnquotedKey(key string) bool {
 	}
 	// Must start with letter or underscore
 	c := key[0]
-	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+	if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && c != '_' {
 		return false
 	}
 	// Followed by letters, digits, underscores, or dots
 	for i := 1; i < len(key); i++ {
 		c := key[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.') {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' && c != '.' {
 			return false
 		}
 	}
 	return true
 }
 
-// #endregion
-
-// #region Object encoding
-
-func (te *toonEncoder) encodeObjectLines(writer io.Writer, node *CandidateNode, depth int) {
+func (te *toonEncoder) encodeObjectLines(writer io.Writer, node *CandidateNode, depth int) error {
 	for i := 0; i < len(node.Content); i += 2 {
 		keyNode := node.Content[i]
 		valueNode := node.Content[i+1]
-		te.encodeKeyValuePairLines(writer, keyNode.Value, valueNode, depth)
-	}
-}
-
-func (te *toonEncoder) encodeKeyValuePairLines(writer io.Writer, key string, value *CandidateNode, depth int) {
-	encodedKey := te.encodeKey(key)
-
-	if value.Kind == ScalarNode {
-		encodedValue := te.encodePrimitive(value)
-		te.writeIndentedLine(writer, depth, encodedKey+": "+encodedValue)
-	} else if value.Kind == SequenceNode {
-		te.encodeArrayLines(writer, key, value, depth)
-	} else if value.Kind == MappingNode {
-		te.writeIndentedLine(writer, depth, encodedKey+":")
-		if len(value.Content) > 0 {
-			te.encodeObjectLines(writer, value, depth+1)
+		if err := te.encodeKeyValuePairLines(writer, keyNode.Value, valueNode, depth); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
-// #endregion
+func (te *toonEncoder) encodeKeyValuePairLines(writer io.Writer, key string, value *CandidateNode, depth int) error {
+	encodedKey := te.encodeKey(key)
 
-// #region Array encoding
+	switch value.Kind {
+	case ScalarNode:
+		encodedValue := te.encodePrimitive(value)
+		return te.writeIndentedLine(writer, depth, encodedKey+": "+encodedValue)
+	case SequenceNode:
+		return te.encodeArrayLines(writer, key, value, depth)
+	case MappingNode:
+		if err := te.writeIndentedLine(writer, depth, encodedKey+":"); err != nil {
+			return err
+		}
+		if len(value.Content) > 0 {
+			return te.encodeObjectLines(writer, value, depth+1)
+		}
+		return nil
+	}
+	return nil
+}
 
-func (te *toonEncoder) encodeArrayLines(writer io.Writer, key string, node *CandidateNode, depth int) {
+func (te *toonEncoder) encodeArrayLines(writer io.Writer, key string, node *CandidateNode, depth int) error {
 	length := len(node.Content)
 
 	if length == 0 {
 		header := te.formatHeader(key, length, nil)
-		te.writeIndentedLine(writer, depth, header)
-		return
+		return te.writeIndentedLine(writer, depth, header)
 	}
 
 	// Check if all primitives
 	if te.isArrayOfPrimitives(node) {
 		arrayLine := te.encodeInlineArrayLine(key, node)
-		te.writeIndentedLine(writer, depth, arrayLine)
-		return
+		return te.writeIndentedLine(writer, depth, arrayLine)
 	}
 
 	// Check if array of objects with uniform fields (tabular)
 	if header := te.extractTabularHeader(node); header != nil {
-		te.encodeArrayOfObjectsAsTabular(writer, key, node, header, depth)
-		return
+		return te.encodeArrayOfObjectsAsTabular(writer, key, node, header, depth)
 	}
 
 	// Mixed or non-uniform array: use list format
-	te.encodeMixedArrayAsListItems(writer, key, node, depth)
+	return te.encodeMixedArrayAsListItems(writer, key, node, depth)
 }
 
 func (te *toonEncoder) isArrayOfPrimitives(node *CandidateNode) bool {
@@ -391,9 +380,11 @@ func (te *toonEncoder) extractTabularHeader(node *CandidateNode) []string {
 	return header
 }
 
-func (te *toonEncoder) encodeArrayOfObjectsAsTabular(writer io.Writer, key string, node *CandidateNode, header []string, depth int) {
+func (te *toonEncoder) encodeArrayOfObjectsAsTabular(writer io.Writer, key string, node *CandidateNode, header []string, depth int) error {
 	formattedHeader := te.formatHeader(key, len(node.Content), header)
-	te.writeIndentedLine(writer, depth, formattedHeader)
+	if err := te.writeIndentedLine(writer, depth, formattedHeader); err != nil {
+		return err
+	}
 
 	// Write rows
 	for _, child := range node.Content {
@@ -413,42 +404,55 @@ func (te *toonEncoder) encodeArrayOfObjectsAsTabular(writer io.Writer, key strin
 				values = append(values, "null")
 			}
 		}
-		te.writeIndentedLine(writer, depth+1, strings.Join(values, te.prefs.Delimiter))
+		if err := te.writeIndentedLine(writer, depth+1, strings.Join(values, te.prefs.Delimiter)); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (te *toonEncoder) encodeMixedArrayAsListItems(writer io.Writer, key string, node *CandidateNode, depth int) {
+func (te *toonEncoder) encodeMixedArrayAsListItems(writer io.Writer, key string, node *CandidateNode, depth int) error {
 	header := te.formatHeader(key, len(node.Content), nil)
-	te.writeIndentedLine(writer, depth, header)
+	if err := te.writeIndentedLine(writer, depth, header); err != nil {
+		return err
+	}
 
 	for _, item := range node.Content {
-		te.encodeListItemValue(writer, item, depth+1)
+		if err := te.encodeListItemValue(writer, item, depth+1); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (te *toonEncoder) encodeListItemValue(writer io.Writer, value *CandidateNode, depth int) {
-	if value.Kind == ScalarNode {
-		te.writeIndentedLine(writer, depth, "- "+te.encodePrimitive(value))
-	} else if value.Kind == SequenceNode {
+func (te *toonEncoder) encodeListItemValue(writer io.Writer, value *CandidateNode, depth int) error {
+	switch value.Kind {
+	case ScalarNode:
+		return te.writeIndentedLine(writer, depth, "- "+te.encodePrimitive(value))
+	case SequenceNode:
 		if te.isArrayOfPrimitives(value) {
 			arrayLine := te.encodeInlineArrayLine("", value)
-			te.writeIndentedLine(writer, depth, "- "+arrayLine)
-		} else {
-			header := te.formatHeader("", len(value.Content), nil)
-			te.writeIndentedLine(writer, depth, "- "+header)
-			for _, item := range value.Content {
-				te.encodeListItemValue(writer, item, depth+1)
+			return te.writeIndentedLine(writer, depth, "- "+arrayLine)
+		}
+		header := te.formatHeader("", len(value.Content), nil)
+		if err := te.writeIndentedLine(writer, depth, "- "+header); err != nil {
+			return err
+		}
+		for _, item := range value.Content {
+			if err := te.encodeListItemValue(writer, item, depth+1); err != nil {
+				return err
 			}
 		}
-	} else if value.Kind == MappingNode {
-		te.encodeObjectAsListItem(writer, value, depth)
+		return nil
+	case MappingNode:
+		return te.encodeObjectAsListItem(writer, value, depth)
 	}
+	return nil
 }
 
-func (te *toonEncoder) encodeObjectAsListItem(writer io.Writer, obj *CandidateNode, depth int) {
+func (te *toonEncoder) encodeObjectAsListItem(writer io.Writer, obj *CandidateNode, depth int) error {
 	if len(obj.Content) == 0 {
-		te.writeIndentedLine(writer, depth, "-")
-		return
+		return te.writeIndentedLine(writer, depth, "-")
 	}
 
 	// First key-value pair
@@ -456,20 +460,25 @@ func (te *toonEncoder) encodeObjectAsListItem(writer io.Writer, obj *CandidateNo
 	firstValue := obj.Content[1]
 	encodedKey := te.encodeKey(firstKey)
 
-	if firstValue.Kind == ScalarNode {
+	switch firstValue.Kind {
+	case ScalarNode:
 		encodedValue := te.encodePrimitive(firstValue)
-		te.writeIndentedLine(writer, depth, "- "+encodedKey+": "+encodedValue)
-	} else if firstValue.Kind == SequenceNode {
+		return te.writeIndentedLine(writer, depth, "- "+encodedKey+": "+encodedValue)
+	case SequenceNode:
 		if len(firstValue.Content) == 0 {
 			header := te.formatHeader(firstKey, 0, nil)
-			te.writeIndentedLine(writer, depth, "- "+header)
-		} else if te.isArrayOfPrimitives(firstValue) {
+			return te.writeIndentedLine(writer, depth, "- "+header)
+		}
+		if te.isArrayOfPrimitives(firstValue) {
 			arrayLine := te.encodeInlineArrayLine(firstKey, firstValue)
-			te.writeIndentedLine(writer, depth, "- "+arrayLine)
-		} else if tabularHeader := te.extractTabularHeader(firstValue); tabularHeader != nil {
+			return te.writeIndentedLine(writer, depth, "- "+arrayLine)
+		}
+		if tabularHeader := te.extractTabularHeader(firstValue); tabularHeader != nil {
 			// Tabular array as first field
 			formattedHeader := te.formatHeader(firstKey, len(firstValue.Content), tabularHeader)
-			te.writeIndentedLine(writer, depth, "- "+formattedHeader)
+			if err := te.writeIndentedLine(writer, depth, "- "+formattedHeader); err != nil {
+				return err
+			}
 			for _, child := range firstValue.Content {
 				var values []string
 				for _, k := range tabularHeader {
@@ -486,33 +495,42 @@ func (te *toonEncoder) encodeObjectAsListItem(writer io.Writer, obj *CandidateNo
 						values = append(values, "null")
 					}
 				}
-				te.writeIndentedLine(writer, depth+2, strings.Join(values, te.prefs.Delimiter))
+				if err := te.writeIndentedLine(writer, depth+2, strings.Join(values, te.prefs.Delimiter)); err != nil {
+					return err
+				}
 			}
-		} else {
-			header := te.formatHeader(firstKey, len(firstValue.Content), nil)
-			te.writeIndentedLine(writer, depth, "- "+header)
-			for _, item := range firstValue.Content {
-				te.encodeListItemValue(writer, item, depth+1)
+			return nil
+		}
+		header := te.formatHeader(firstKey, len(firstValue.Content), nil)
+		if err := te.writeIndentedLine(writer, depth, "- "+header); err != nil {
+			return err
+		}
+		for _, item := range firstValue.Content {
+			if err := te.encodeListItemValue(writer, item, depth+1); err != nil {
+				return err
 			}
 		}
-	} else if firstValue.Kind == MappingNode {
-		te.writeIndentedLine(writer, depth, "- "+encodedKey+":")
+		return nil
+	case MappingNode:
+		if err := te.writeIndentedLine(writer, depth, "- "+encodedKey+":"); err != nil {
+			return err
+		}
 		if len(firstValue.Content) > 0 {
-			te.encodeObjectLines(writer, firstValue, depth+2)
+			return te.encodeObjectLines(writer, firstValue, depth+2)
 		}
+		return nil
 	}
 
 	// Remaining key-value pairs
 	for i := 2; i < len(obj.Content); i += 2 {
 		key := obj.Content[i].Value
 		value := obj.Content[i+1]
-		te.encodeKeyValuePairLines(writer, key, value, depth+1)
+		if err := te.encodeKeyValuePairLines(writer, key, value, depth+1); err != nil {
+			return err
+		}
 	}
+	return nil
 }
-
-// #endregion
-
-// #region Header formatting
 
 func (te *toonEncoder) formatHeader(key string, length int, fields []string) string {
 	var header strings.Builder
@@ -547,18 +565,10 @@ func (te *toonEncoder) formatHeader(key string, length int, fields []string) str
 	return header.String()
 }
 
-// #endregion
-
-// #region Indentation helpers
-
-func (te *toonEncoder) writeIndentedLine(writer io.Writer, depth int, content string) {
+func (te *toonEncoder) writeIndentedLine(writer io.Writer, depth int, content string) error {
 	indent := strings.Repeat(" ", te.prefs.Indent*depth)
-	writeString(writer, indent+content+"\n")
+	return writeString(writer, indent+content+"\n")
 }
-
-// #endregion
-
-// #region Colorization
 
 const toonEscape = "\x1b"
 
@@ -566,23 +576,23 @@ func toonFormat(attr color.Attribute) string {
 	return fmt.Sprintf("%s[%dm", toonEscape, attr)
 }
 
-// colorizeToonAndPrint applies syntax highlighting to TOON format output.
-func colorizeToonAndPrint(toonBytes []byte, writer io.Writer) error {
+// colourizeToonAndPrint applies syntax highlighting to TOON format output.
+func colourizeToonAndPrint(toonBytes []byte, writer io.Writer) error {
 	lines := bytes.Split(toonBytes, []byte("\n"))
 	for _, line := range lines {
 		if len(line) == 0 {
 			continue
 		}
-		colorized := colorizeToonLine(line)
-		if _, err := writer.Write(append(colorized, '\n')); err != nil {
+		colourized := colourizeToonLine(line)
+		if _, err := writer.Write(append(colourized, '\n')); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// colorizeToonLine applies colors to a single TOON line.
-func colorizeToonLine(line []byte) []byte {
+// colourizeToonLine applies colors to a single TOON line.
+func colourizeToonLine(line []byte) []byte {
 	lineStr := string(line)
 	var result strings.Builder
 	i := 0
@@ -605,12 +615,12 @@ func colorizeToonLine(line []byte) []byte {
 				// This is an array header
 				restStart := i + idx + restIdx + 2
 
-				// Colorize key (cyan)
+				// Colourize key (cyan)
 				result.WriteString(toonFormat(color.FgCyan))
 				result.WriteString(keyPart)
 				result.WriteString(toonFormat(color.Reset))
 
-				// Colorize brackets and length (yellow)
+				// Colourize brackets and length (yellow)
 				result.WriteString(toonFormat(color.FgHiYellow))
 				result.WriteString(lineStr[i+idx : restStart])
 				result.WriteString(toonFormat(color.Reset))
@@ -620,7 +630,7 @@ func colorizeToonLine(line []byte) []byte {
 					braceEnd := strings.Index(lineStr[restStart:], "}")
 					if braceEnd != -1 {
 						braceEnd += restStart
-						// Colorize braces and fields (magenta)
+						// Colourize braces and fields (magenta)
 						result.WriteString(toonFormat(color.FgHiMagenta))
 						result.WriteString(lineStr[restStart : braceEnd+1])
 						result.WriteString(toonFormat(color.Reset))
@@ -628,18 +638,18 @@ func colorizeToonLine(line []byte) []byte {
 					}
 				}
 
-				// Colorize colon (white/default)
+				// Colourize colon (white/default)
 				if restStart < len(lineStr) && lineStr[restStart] == ':' {
 					result.WriteByte(':')
 					restStart++
 				}
 
-				// Colorize inline values after colon
+				// Colourize inline values after colon
 				if restStart < len(lineStr) {
 					afterColon := strings.TrimSpace(lineStr[restStart:])
 					if afterColon != "" {
 						result.WriteByte(' ')
-						colorizeToonValues(&result, afterColon, ",")
+						colourizeToonValues(&result, afterColon, ",")
 					}
 				}
 
@@ -670,14 +680,14 @@ func colorizeToonLine(line []byte) []byte {
 						key := rest[:colonIdx]
 						value := rest[colonIdx+2:]
 
-						// Colorize key (cyan)
+						// Colourize key (cyan)
 						result.WriteString(toonFormat(color.FgCyan))
 						result.WriteString(key)
 						result.WriteString(toonFormat(color.Reset))
 						result.WriteString(": ")
 
-						// Colorize value
-						colorizeToonValue(&result, value)
+						// Colourize value
+						colourizeToonValue(&result, value)
 					} else if strings.HasSuffix(rest, ":") {
 						// Just a key with colon (nested object)
 						key := rest[:len(rest)-1]
@@ -687,7 +697,7 @@ func colorizeToonLine(line []byte) []byte {
 						result.WriteByte(':')
 					} else {
 						// Primitive value after hyphen
-						colorizeToonValue(&result, rest)
+						colourizeToonValue(&result, rest)
 					}
 				}
 				return []byte(result.String())
@@ -699,14 +709,14 @@ func colorizeToonLine(line []byte) []byte {
 			key := lineStr[i : i+colonIdx]
 			value := lineStr[i+colonIdx+2:]
 
-			// Colorize key (cyan)
+			// Colourize key (cyan)
 			result.WriteString(toonFormat(color.FgCyan))
 			result.WriteString(key)
 			result.WriteString(toonFormat(color.Reset))
 			result.WriteString(": ")
 
-			// Colorize value
-			colorizeToonValue(&result, value)
+			// Colourize value
+			colourizeToonValue(&result, value)
 			return []byte(result.String())
 		}
 
@@ -722,20 +732,20 @@ func colorizeToonLine(line []byte) []byte {
 
 		// Tabular row or primitive values (comma-separated)
 		if strings.Contains(lineStr[i:], ",") {
-			colorizeToonValues(&result, lineStr[i:], ",")
+			colourizeToonValues(&result, lineStr[i:], ",")
 			return []byte(result.String())
 		}
 
-		// Fallback: colorize as primitive value
-		colorizeToonValue(&result, lineStr[i:])
+		// Fallback: colourize as primitive value
+		colourizeToonValue(&result, lineStr[i:])
 		return []byte(result.String())
 	}
 
 	return []byte(result.String())
 }
 
-// colorizeToonValue colorizes a single primitive value.
-func colorizeToonValue(result *strings.Builder, value string) {
+// colourizeToonValue colourizes a single primitive value.
+func colourizeToonValue(result *strings.Builder, value string) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return
@@ -782,14 +792,14 @@ func colorizeToonValue(result *strings.Builder, value string) {
 	result.WriteString(value)
 }
 
-// colorizeToonValues colorizes comma-separated values.
-func colorizeToonValues(result *strings.Builder, values string, delimiter string) {
+// colourizeToonValues colourizes comma-separated values.
+func colourizeToonValues(result *strings.Builder, values string, delimiter string) {
 	parts := splitToonValues(values, delimiter)
 	for idx, part := range parts {
 		if idx > 0 {
 			result.WriteString(delimiter)
 		}
-		colorizeToonValue(result, part)
+		colourizeToonValue(result, part)
 	}
 }
 
@@ -889,4 +899,3 @@ func isToonNumber(s string) bool {
 	return hasDigit
 }
 
-// #endregion

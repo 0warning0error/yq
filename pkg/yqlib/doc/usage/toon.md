@@ -287,7 +287,7 @@ name: hello
 ```
 then
 ```bash
-yq -otoon sample.toon
+yq -o toon sample.toon
 ```
 will output
 ```toon
@@ -303,7 +303,7 @@ user:
 ```
 then
 ```bash
-yq -otoon sample.toon
+yq -o toon sample.toon
 ```
 will output
 ```toon
@@ -319,7 +319,7 @@ tags[3]: admin,ops,dev
 ```
 then
 ```bash
-yq -otoon sample.toon
+yq -o toon sample.toon
 ```
 will output
 ```toon
@@ -335,7 +335,7 @@ items[2]{sku,qty,price}:
 ```
 then
 ```bash
-yq -otoon sample.toon
+yq -o toon sample.toon
 ```
 will output
 ```toon

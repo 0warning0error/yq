@@ -89,13 +89,15 @@ func (dec *toonDecoder) readAllLines() error {
 
 func (dec *toonDecoder) computeDepth(line string) int {
 	spaceCount := 0
+end:
 	for _, c := range line {
-		if c == ' ' {
+		switch c {
+		case ' ':
 			spaceCount++
-		} else if c == '\t' {
+		case '\t':
 			spaceCount += dec.indent // Treat tab as indent spaces
-		} else {
-			break
+		default:
+			break end
 		}
 	}
 	return spaceCount / dec.indent
@@ -108,13 +110,11 @@ func (dec *toonDecoder) peek() *parsedLine {
 	return &dec.lines[dec.pos]
 }
 
-func (dec *toonDecoder) advance() *parsedLine {
+func (dec *toonDecoder) advance() {
 	if dec.pos >= len(dec.lines) {
-		return nil
+		return 
 	}
-	line := &dec.lines[dec.pos]
 	dec.pos++
-	return line
 }
 
 func (dec *toonDecoder) decodeValue(baseDepth int) *CandidateNode {
